@@ -1972,21 +1972,16 @@ const matchResult: MatchResult = {
   // Initialize background audio element, attempt immediate autoplay,
   // and attach global interaction fallback if blocked by browser policy.
   useEffect(() => {
-    let audio: HTMLAudioElement | null = null;
+    const audio = bgAudioRef.current;
     let onPlayEvent: (() => void) | null = null;
     let onPauseEvent: (() => void) | null = null;
     let onErrorEvent: (() => void) | null = null;
 
-    if (!isYouTube) {
-      audio = bgAudioRef.current;
-      if (!audio) {
-        audio = new Audio(BACKGROUND_MUSIC_URL);
-        bgAudioRef.current = audio;
-      }
-
+    if (!isYouTube && audio) {
       audio.loop = true;
       audio.volume = bgVolume;
 
+      // Native event listeners directly synchronizing React state
       onPlayEvent = () => {
         setIsBgMusicPlaying(true);
         setUsingSynthBg(false);
@@ -2003,7 +1998,10 @@ const matchResult: MatchResult = {
       audio.addEventListener("play", onPlayEvent);
       audio.addEventListener("pause", onPauseEvent);
       audio.addEventListener("error", onErrorEvent);
-    } else {
+
+      // Initialize state to match the real element state
+      setIsBgMusicPlaying(!audio.paused);
+    } else if (isYouTube) {
       // YouTube mode starts in active state
       setIsBgMusicPlaying(true);
     }
@@ -2050,18 +2048,19 @@ const matchResult: MatchResult = {
       } else {
         const currentAudio = bgAudioRef.current;
         if (currentAudio) {
-          currentAudio
-            .play()
-            .then(() => {
-              setIsBgMusicPlaying(true);
-              cleanupInteractionListeners();
-            })
-            .catch((err) => {
-              console.log("Audio play after interaction error:", err);
-              audioEngine.startBgSynth(bgVolume);
-              setIsBgMusicPlaying(true);
-              cleanupInteractionListeners();
-            });
+          if (currentAudio.paused) {
+            currentAudio
+              .play()
+              .then(() => {
+                cleanupInteractionListeners();
+              })
+              .catch((err) => {
+                console.log("Audio play after interaction error:", err);
+                cleanupInteractionListeners();
+              });
+          } else {
+            cleanupInteractionListeners();
+          }
         } else {
           cleanupInteractionListeners();
         }
@@ -2083,27 +2082,13 @@ const matchResult: MatchResult = {
       });
     };
 
-    // 2. The Autoplay Attempt: immediately call .play() on mount if native audio
+    // Autoplay Attempt: immediately call .play() on mount if native audio
     if (!isYouTube && audio) {
-      try {
-        const playPromise = audio.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => {
-              setIsBgMusicPlaying(true);
-            })
-            .catch((error) => {
-              console.log("Autoplay blocked by browser, awaiting interaction:", error);
-              setIsBgMusicPlaying(false);
-              attachGlobalInteractionFallback();
-            });
-        }
-      } catch (err) {
-        console.log("Synchronous play error:", err);
+      audio.play().catch((error) => {
+        console.log("Autoplay blocked by browser, awaiting interaction:", error);
         attachGlobalInteractionFallback();
-      }
+      });
     } else {
-      // For YouTube, attach fallback to ensure playback begins on first touch if autoplay was prevented
       attachGlobalInteractionFallback();
     }
 
@@ -2175,16 +2160,39 @@ const matchResult: MatchResult = {
   }, [bgVolume, isBgAudioMuted, isYouTube]);
 
   const toggleBgMusic = () => {
-    if (isBgMusicPlaying) {
-      pauseBgMusic();
+    if (isYouTube) {
+      if (isBgMusicPlaying) {
+        pauseBgMusic();
+      } else {
+        playBgMusic();
+      }
+      return;
+    }
+
+    const audio = bgAudioRef.current;
+    if (audio) {
+      if (audio.paused) {
+        audio.play().catch((err) => {
+          console.log("Audio play error, falling back to synth:", err);
+          setUsingSynthBg(true);
+          audioEngine.startBgSynth(bgVolume);
+          setIsBgMusicPlaying(true);
+        });
+      } else {
+        audio.pause();
+      }
     } else {
-      playBgMusic();
+      if (isBgMusicPlaying) {
+        pauseBgMusic();
+      } else {
+        playBgMusic();
+      }
     }
   };
 
   const playBgMusic = () => {
-    setIsBgMusicPlaying(true);
     if (isYouTube) {
+      setIsBgMusicPlaying(true);
       try {
         ytPlayerRef.current?.contentWindow?.postMessage(
           JSON.stringify({ event: "command", func: "playVideo", args: [] }),
@@ -2205,7 +2213,6 @@ const matchResult: MatchResult = {
       bgAudioRef.current
         .play()
         .then(() => {
-          setIsBgMusicPlaying(true);
           setUsingSynthBg(false);
         })
         .catch(() => {
@@ -2221,8 +2228,8 @@ const matchResult: MatchResult = {
   };
 
   const pauseBgMusic = () => {
-    setIsBgMusicPlaying(false);
     if (isYouTube) {
+      setIsBgMusicPlaying(false);
       try {
         ytPlayerRef.current?.contentWindow?.postMessage(
           JSON.stringify({ event: "command", func: "pauseVideo", args: [] }),
@@ -2235,7 +2242,11 @@ const matchResult: MatchResult = {
     if (bgAudioRef.current) {
       bgAudioRef.current.pause();
     }
-    audioEngine.stopBgSynth();
+    if (usingSynthBg) {
+      audioEngine.stopBgSynth();
+      setUsingSynthBg(false);
+      setIsBgMusicPlaying(false);
+    }
   };
 
   // ==========================================================================
@@ -2576,6 +2587,13 @@ const matchResult: MatchResult = {
           preload="auto"
           loop
           playsInline
+          onPlay={() => {
+            setIsBgMusicPlaying(true);
+            setUsingSynthBg(false);
+          }}
+          onPause={() => {
+            setIsBgMusicPlaying(false);
+          }}
         />
       )}
 
